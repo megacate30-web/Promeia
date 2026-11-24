@@ -1,0 +1,42 @@
+package com.promeia.music;
+
+import android.app.*;
+import android.content.*;
+import android.graphics.*;
+import android.media.*;
+import android.media.audiofx.*;
+import android.media.session.*;
+import android.net.Uri;
+import android.os.*;
+import java.util.*;
+
+public class PlaybackService extends Service {
+    static PlaybackService active; static final String CHANNEL="playback";
+    final ArrayList<String> queue=new ArrayList<>(); int index=-1, repeat=0; boolean shuffle=false, ready=false, playing=false;
+    MediaPlayer player; MediaSession session; AudioManager audio; AudioFocusRequest focus; Equalizer eq; BassBoost bass; Store store;
+    BroadcastReceiver noisy=new BroadcastReceiver(){public void onReceive(Context c,Intent i){pause();}};
+    static void send(Context c,String action){Intent i=new Intent(c,PlaybackService.class).setAction(action);c.startService(i);}
+    static void play(Context c,ArrayList<String> ids,int index){Intent i=new Intent(c,PlaybackService.class).setAction("play").putStringArrayListExtra("queue",ids).putExtra("index",index);c.startForegroundService(i);}
+    @Override public void onCreate(){super.onCreate();active=this;store=Store.get(this);audio=(AudioManager)getSystemService(AUDIO_SERVICE);NotificationManager nm=getSystemService(NotificationManager.class);nm.createNotificationChannel(new NotificationChannel(CHANNEL,"Reproducción musical",NotificationManager.IMPORTANCE_LOW));
+        session=new MediaSession(this,"Promeia");session.setCallback(new MediaSession.Callback(){public void onPlay(){resume();}public void onPause(){pause();}public void onSkipToNext(){next(true);}public void onSkipToPrevious(){previous();}public void onSeekTo(long p){seek((int)p);}public void onStop(){stopSelf();}});session.setActive(true);
+        focus=new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()).setOnAudioFocusChangeListener(f->{if(f==AudioManager.AUDIOFOCUS_LOSS||f==AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)pause();else if(player!=null&&f==AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK)player.setVolume(.2f,.2f);else if(player!=null&&f==AudioManager.AUDIOFOCUS_GAIN)player.setVolume(1,1);}).build();
+        if(Build.VERSION.SDK_INT>=33)registerReceiver(noisy,new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),Context.RECEIVER_NOT_EXPORTED);else registerReceiver(noisy,new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));}
+    @Override public int onStartCommand(Intent intent,int flags,int startId){if(intent==null)return START_NOT_STICKY;String a=intent.getAction();if("play".equals(a)){ArrayList<String> ids=intent.getStringArrayListExtra("queue");if(ids!=null){queue.clear();queue.addAll(ids);index=intent.getIntExtra("index",0);startForeground(1,notification());open();}}else if("toggle".equals(a)){if(playing)pause();else resume();}else if("next".equals(a))next(true);else if("previous".equals(a))previous();else if("stop".equals(a))stopSelf();return START_NOT_STICKY;}
+    Store.Song song(){return index>=0&&index<queue.size()?store.find(queue.get(index)):null;}
+    int position(){try{return ready&&player!=null?player.getCurrentPosition():0;}catch(Exception e){return 0;}}
+    int duration(){try{return ready&&player!=null?player.getDuration():0;}catch(Exception e){return 0;}}
+    void seek(int p){if(ready&&player!=null){player.seekTo(Math.max(0,Math.min(p,duration())));publish();}}
+    void releasePlayer(){ready=false;playing=false;try{if(eq!=null)eq.release();}catch(Exception ignored){}try{if(bass!=null)bass.release();}catch(Exception ignored){}eq=null;bass=null;if(player!=null){player.release();player=null;}}
+    void open(){releasePlayer();Store.Song s=song();if(s==null){stopSelf();return;}try{player=new MediaPlayer();player.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());player.setWakeMode(this,PowerManager.PARTIAL_WAKE_LOCK);player.setDataSource(this,Uri.parse(s.uri));player.setOnPreparedListener(m->{if(m!=player)return;ready=true;applyEq();resume();});player.setOnCompletionListener(m->{if(repeat==1){seek(0);resume();}else next(false);});player.setOnErrorListener((m,w,e)->{pause();return true;});player.prepareAsync();publish();}catch(Exception e){releasePlayer();publish();}}
+    void resume(){if(!ready||player==null)return;startForeground(1,notification());if(audio.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED)return;try{player.start();playing=true;publish();}catch(Exception ignored){}}
+    void pause(){if(ready&&player!=null)try{player.pause();}catch(Exception ignored){}playing=false;audio.abandonAudioFocusRequest(focus);publish();}
+    void next(boolean manual){if(queue.isEmpty())return;if(shuffle&&queue.size()>1){int n;do{n=new Random().nextInt(queue.size());}while(n==index);index=n;}else if(index+1<queue.size())index++;else if(repeat==2||manual)index=0;else{pause();seek(0);return;}open();}
+    void previous(){if(position()>3000){seek(0);return;}if(index>0)index--;else if(repeat==2)index=queue.size()-1;open();}
+    void applyEq(){if(!ready||player==null)return;try{if(eq==null)eq=new Equalizer(0,player.getAudioSessionId());short n=eq.getNumberOfBands();short[] range=eq.getBandLevelRange();for(short i=0;i<n;i++){int band=closestBand(eq.getCenterFreq(i)/1000);int value=store.p.getInt("eq"+band,0)*100;eq.setBandLevel(i,(short)Math.max(range[0],Math.min(range[1],value)));}eq.setEnabled(store.p.getBoolean("eqEnabled",false));}catch(Exception ignored){}try{if(bass==null)bass=new BassBoost(0,player.getAudioSessionId());if(bass.getStrengthSupported())bass.setStrength((short)(store.p.getInt("bass",0)*10));bass.setEnabled(store.p.getBoolean("eqEnabled",false));}catch(Exception ignored){}}
+    static int closestBand(int f){int[] hz={60,230,910,3600,14000};int best=0;for(int i=1;i<hz.length;i++)if(Math.abs(Math.log((double)Math.max(1,f)/hz[i]))<Math.abs(Math.log((double)Math.max(1,f)/hz[best])))best=i;return best;}
+    PendingIntent action(String a){return PendingIntent.getService(this,a.hashCode(),new Intent(this,PlaybackService.class).setAction(a),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);}
+    Notification notification(){Store.Song s=song();Notification.Builder b=new Notification.Builder(this,CHANNEL).setSmallIcon(com.promeia.music.R.drawable.ic_logo).setContentTitle(s==null?"Promeia Music":s.title).setContentText(s==null?"Preparando audio":s.artist).setContentIntent(PendingIntent.getActivity(this,0,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT)).setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true).setOngoing(playing).addAction(android.R.drawable.ic_media_previous,"Anterior",action("previous")).addAction(playing?android.R.drawable.ic_media_pause:android.R.drawable.ic_media_play,playing?"Pausar":"Reproducir",action("toggle")).addAction(android.R.drawable.ic_media_next,"Siguiente",action("next")).addAction(android.R.drawable.ic_menu_close_clear_cancel,"Cerrar",action("stop")).setStyle(new Notification.MediaStyle().setMediaSession(session.getSessionToken()).setShowActionsInCompactView(0,1,2));return b.build();}
+    void publish(){if(session==null)return;Store.Song s=song();if(s!=null){MediaMetadata.Builder b=new MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE,s.title).putString(MediaMetadata.METADATA_KEY_ARTIST,s.artist).putString(MediaMetadata.METADATA_KEY_ALBUM,s.album).putLong(MediaMetadata.METADATA_KEY_DURATION,s.duration);session.setMetadata(b.build());}session.setPlaybackState(new PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY|PlaybackState.ACTION_PAUSE|PlaybackState.ACTION_PLAY_PAUSE|PlaybackState.ACTION_SKIP_TO_NEXT|PlaybackState.ACTION_SKIP_TO_PREVIOUS|PlaybackState.ACTION_SEEK_TO|PlaybackState.ACTION_STOP).setState(playing?PlaybackState.STATE_PLAYING:ready?PlaybackState.STATE_PAUSED:PlaybackState.STATE_BUFFERING,position(),playing?1f:0f).build());getSystemService(NotificationManager.class).notify(1,notification());}
+    @Override public IBinder onBind(Intent i){return null;}
+    @Override public void onDestroy(){releasePlayer();if(audio!=null&&focus!=null)audio.abandonAudioFocusRequest(focus);if(session!=null)session.release();unregisterReceiver(noisy);stopForeground(STOP_FOREGROUND_REMOVE);active=null;super.onDestroy();}
+}
