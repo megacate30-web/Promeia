@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <application android:theme="@style/AppTheme" android:label="Promeia Music" android:icon="@drawable/ic_logo" android:allowBackup="false" android:usesCleartextTraffic="false" android:supportsRtl="true">
+    <application android:theme="@style/AppTheme" android:label="Promeia" android:icon="@drawable/ic_logo" android:allowBackup="false" android:usesCleartextTraffic="false" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
             <intent-filter><action android:name="android.intent.action.SEND"/><category android:name="android.intent.category.DEFAULT"/><data android:mimeType="image/*"/><data android:mimeType="audio/*"/></intent-filter>

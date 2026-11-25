@@ -21,7 +21,7 @@ import java.util.regex.*;
 
 public class MainActivity extends Activity {
     Store store; LinearLayout root, body, mini; FrameLayout content; TextView miniTitle, miniPlay; ImageView miniArt;
-    int bg, panel, ink, muted, accent, navColor; boolean dark; String tab="Biblioteca", filter="", group="Canciones", page=""; Store.Playlist selected; String coverId=""; boolean coverPlaylist=false; int afterFolder=0;
+    int bg, panel, ink, muted, accent, navColor; boolean dark, introShown=false, lastPlaying=false; String tab="Biblioteca", filter="", group="Canciones", page=""; Store.Playlist selected; String coverId=""; boolean coverPlaylist=false; int afterFolder=0;
     static final int FOLDER=101, AUDIO=102, COVER=103, EXPORT=104, RESTORE=105; final Handler handler=new Handler(Looper.getMainLooper()); final ExecutorService worker=Executors.newSingleThreadExecutor();
     SeekBar progress; TextView clock, playButton, currentTitle, currentArtist, lyricLine; ImageView playerArt; String shownSong=""; String lyricSong=""; final ArrayList<Line> lyricLines=new ArrayList<>(); String plainLyrics="", translatedPlain=""; boolean showTranslation=false, lyricsVisible=false; int lyricRequest=0; Translator translator; LanguageIdentifier identifier;
     static class Line {long ms;String text, translated="";Line(long m,String t){ms=m;text=t;}}
@@ -30,30 +30,147 @@ public class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle b){super.onSaveInstanceState(b);b.putString("coverId",coverId);b.putBoolean("coverPlaylist",coverPlaylist);b.putInt("afterFolder",afterFolder);}
     @Override protected void onDestroy(){handler.removeCallbacksAndMessages(null);worker.shutdown();if(translator!=null)translator.close();if(identifier!=null)identifier.close();super.onDestroy();}
     int dp(float v){return (int)(getResources().getDisplayMetrics().density*v+.5f);}
-    void theme(){dark=store.p.getBoolean("dark",true);bg=Color.parseColor(dark?"#111318":"#F4F5F3");panel=Color.parseColor(dark?"#20242B":"#FFFFFF");ink=Color.parseColor(dark?"#F1F4F3":"#17231E");muted=Color.parseColor(dark?"#A7B0B4":"#55645D");accent=Color.parseColor(dark?"#A7E8CA":"#19684D");navColor=dark?Color.parseColor("#171A20"):Color.WHITE;getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(navColor);getWindow().getDecorView().setSystemUiVisibility(dark?0:View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);}
-    GradientDrawable shape(int color,int radius){GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(dp(radius));return d;}
+    void theme(){
+        dark=store.p.getBoolean("dark",true);
+        int fallbackBg=Color.parseColor(dark?"#101117":"#F3F4F6");
+        bg=store.p.getInt("bgColor",fallbackBg);
+        boolean light=Color.luminance(bg)>.52f;
+        panel=Color.parseColor(light?"#FFFFFF":"#20232B");
+        ink=store.p.getInt("textColor",Color.parseColor(light?"#15171B":"#F4F5F7"));
+        muted=Color.argb(light?175:190,Color.red(ink),Color.green(ink),Color.blue(ink));
+        accent=Color.parseColor(dark?"#B7A4FF":"#7257C8");
+        navColor=blend(bg,panel,.58f);
+        getWindow().setStatusBarColor(bg);
+        getWindow().setNavigationBarColor(navColor);
+        getWindow().getDecorView().setSystemUiVisibility(light?View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR:0);
+    }
+    int blend(int a,int b,float amount){
+        float t=Math.max(0f,Math.min(1f,amount));
+        return Color.rgb((int)(Color.red(a)*(1-t)+Color.red(b)*t),(int)(Color.green(a)*(1-t)+Color.green(b)*t),(int)(Color.blue(a)*(1-t)+Color.blue(b)*t));
+    }
+    GradientDrawable shape(int color,int radius){
+        int top=blend(color,Color.WHITE,dark?.075f:.035f);
+        GradientDrawable d=new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{top,color});
+        d.setCornerRadius(dp(radius));
+        d.setStroke(dp(1),Color.argb(dark?44:92,255,255,255));
+        return d;
+    }
+    void animatePress(View view){
+        if(view==null)return;
+        view.animate().cancel();
+        view.animate().scaleX(.965f).scaleY(.965f).alpha(.88f).setDuration(75).withEndAction(()->view.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(170).start()).start();
+    }
+    void feedback(String message){
+        if(content==null||isFinishing()){toast(message);return;}
+        TextView chip=text(message,13,Color.WHITE);
+        chip.setTypeface(null,Typeface.BOLD);
+        chip.setPadding(dp(18),dp(12),dp(18),dp(12));
+        chip.setBackground(shape(Color.parseColor(dark?"#343044":"#51436F"),22));
+        chip.setElevation(dp(12));
+        FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
+        lp.bottomMargin=dp(20);
+        content.addView(chip,lp);
+        chip.setAlpha(0f);chip.setTranslationY(dp(14));
+        chip.animate().alpha(1f).translationY(0).setDuration(190).start();
+        handler.postDelayed(()->{if(chip.getParent()!=null)chip.animate().alpha(0f).translationY(dp(12)).setDuration(180).withEndAction(()->content.removeView(chip)).start();},1500);
+    }
+    void showIntro(ScrollView scroll){
+        if(Build.VERSION.SDK_INT>=31)scroll.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(13),dp(13),android.graphics.Shader.TileMode.CLAMP));
+        FrameLayout overlay=new FrameLayout(this);
+        overlay.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{blend(bg,accent,.24f),bg,blend(bg,Color.BLACK,.18f)}));
+        LinearLayout center=col();center.setGravity(Gravity.CENTER);
+        FrameLayout stage=new FrameLayout(this);
+        LinearLayout.LayoutParams stageLp=new LinearLayout.LayoutParams(dp(204),dp(204));stageLp.bottomMargin=dp(18);center.addView(stage,stageLp);
+        View halo=new View(this);
+        GradientDrawable haloBg=new GradientDrawable();haloBg.setShape(GradientDrawable.OVAL);haloBg.setColor(Color.argb(42,Color.red(accent),Color.green(accent),Color.blue(accent)));
+        halo.setBackground(haloBg);
+        if(Build.VERSION.SDK_INT>=31)halo.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(25),dp(25),android.graphics.Shader.TileMode.CLAMP));
+        FrameLayout.LayoutParams haloLp=new FrameLayout.LayoutParams(dp(172),dp(172),Gravity.CENTER);stage.addView(halo,haloLp);
+        ImageView logo=new ImageView(this);logo.setImageResource(R.drawable.ic_logo);logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        FrameLayout.LayoutParams logoLp=new FrameLayout.LayoutParams(dp(104),dp(104),Gravity.CENTER);stage.addView(logo,logoLp);
+        TextView name=text("PROMEIA",27,ink);name.setTypeface(null,Typeface.BOLD);name.setLetterSpacing(.18f);name.setGravity(Gravity.CENTER);center.addView(name);
+        TextView tagline=text("YOUR SOUND. YOUR SPACE.",11,muted);tagline.setLetterSpacing(.20f);tagline.setGravity(Gravity.CENTER);LinearLayout.LayoutParams tagLp=new LinearLayout.LayoutParams(-2,-2);tagLp.topMargin=dp(9);center.addView(tagline,tagLp);
+        FrameLayout.LayoutParams centerLp=new FrameLayout.LayoutParams(-1,-1);overlay.addView(center,centerLp);
+        content.addView(overlay,new FrameLayout.LayoutParams(-1,-1));
+        overlay.setAlpha(0f);overlay.setScaleX(1.025f);overlay.setScaleY(1.025f);
+        overlay.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(420).start();
+        logo.setRotation(-18f);logo.setScaleX(.72f);logo.setScaleY(.72f);
+        logo.animate().rotation(342f).scaleX(1f).scaleY(1f).setDuration(1050).start();
+        halo.animate().scaleX(1.12f).scaleY(1.12f).alpha(.7f).setDuration(1100).start();
+        handler.postDelayed(()->overlay.animate().alpha(0f).translationY(-dp(18)).setDuration(420).withEndAction(()->{
+            if(overlay.getParent()!=null)content.removeView(overlay);
+            if(Build.VERSION.SDK_INT>=31)scroll.setRenderEffect(null);
+        }).start(),1750);
+    }
     LinearLayout col(){LinearLayout v=new LinearLayout(this);v.setOrientation(LinearLayout.VERTICAL);return v;}
     LinearLayout row(){LinearLayout v=new LinearLayout(this);v.setOrientation(LinearLayout.HORIZONTAL);v.setGravity(Gravity.CENTER_VERTICAL);return v;}
     TextView text(String s,int sp,int color){TextView t=new TextView(this);t.setText(s);t.setTextSize(sp);t.setTextColor(color);return t;}
     TextView label(String s){TextView t=text(s,13,muted);t.setPadding(0,dp(15),0,dp(7));return t;}
-    TextView button(String s,Runnable r){TextView b=text(s,14,accent);b.setGravity(Gravity.CENTER);b.setTypeface(null,Typeface.BOLD);b.setPadding(dp(12),dp(11),dp(12),dp(11));b.setBackground(shape(panel,14));b.setOnClickListener(v->r.run());b.setFocusable(true);return b;}
-    void add(LinearLayout parent,View v){LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.bottomMargin=dp(8);parent.addView(v,lp);}
+    TextView button(String s,Runnable r){
+        TextView b=text(s,14,accent);b.setGravity(Gravity.CENTER);b.setTypeface(null,Typeface.BOLD);
+        b.setPadding(dp(12),dp(11),dp(12),dp(11));b.setBackground(shape(panel,15));b.setElevation(dp(2));
+        b.setOnClickListener(v->{v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);animatePress(v);r.run();});
+        b.setFocusable(true);return b;
+    }
+    void add(LinearLayout parent,View v){
+        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.bottomMargin=dp(9);parent.addView(v,lp);
+        if(parent==body){v.setAlpha(0f);v.setTranslationY(dp(7));v.animate().alpha(1f).translationY(0).setDuration(230).start();}
+    }
     void weight(LinearLayout r,View v){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,-2,1);p.setMargins(dp(3),0,dp(3),0);r.addView(v,p);}
     void title(String t,String desc){TextView h=text(t,27,ink);h.setTypeface(null,Typeface.BOLD);add(body,h);TextView s=text(desc,14,muted);add(body,s);}
     void toast(String t){if(!isFinishing())Toast.makeText(this,t,Toast.LENGTH_LONG).show();}
     void error(Exception e){toast(e.getMessage()==null?"No se pudo completar la operación":e.getMessage());}
     EditText input(String hint,String value){EditText e=new EditText(this);e.setSingleLine(true);e.setTextColor(ink);e.setHintTextColor(muted);e.setTextSize(15);e.setHint(hint);e.setText(value);e.setPadding(dp(13),dp(10),dp(13),dp(10));e.setBackground(shape(panel,12));return e;}
-    void draw(){theme();progress=null;clock=null;playButton=null;currentTitle=null;currentArtist=null;playerArt=null;lyricLine=null;root=col();root.setBackgroundColor(bg);root.setOnApplyWindowInsetsListener((v,insets)->{if(Build.VERSION.SDK_INT>=30){android.graphics.Insets i=insets.getInsets(WindowInsets.Type.systemBars());v.setPadding(i.left,i.top,i.right,i.bottom);}else v.setPadding(0,0,0,0);return insets;});setContentView(root);root.requestApplyInsets();
-        LinearLayout header=row();header.setPadding(dp(18),dp(12),dp(18),dp(8));ImageView logo=new ImageView(this);logo.setImageResource(R.drawable.ic_logo);header.addView(logo,new LinearLayout.LayoutParams(dp(36),dp(36)));TextView brand=text("PROMEIA  /  MUSIC",15,ink);brand.setTypeface(null,Typeface.BOLD);brand.setPadding(dp(11),0,0,0);header.addView(brand,new LinearLayout.LayoutParams(0,-2,1));TextView info=text("LOCAL",11,muted);header.addView(info);root.addView(header);
-        content=new FrameLayout(this);root.addView(content,new LinearLayout.LayoutParams(-1,0,1));ScrollView scroll=new ScrollView(this);scroll.setFillViewport(false);body=col();body.setPadding(dp(18),dp(12),dp(18),dp(16));scroll.addView(body);content.addView(scroll);
+    void draw(){
+        theme();progress=null;clock=null;playButton=null;currentTitle=null;currentArtist=null;playerArt=null;lyricLine=null;
+        root=col();
+        GradientDrawable rootBg=new GradientDrawable(GradientDrawable.Orientation.TL_BR,new int[]{blend(bg,accent,.075f),bg,blend(bg,Color.BLACK,.07f)});
+        root.setBackground(rootBg);
+        root.setOnApplyWindowInsetsListener((v,insets)->{if(Build.VERSION.SDK_INT>=30){android.graphics.Insets i=insets.getInsets(WindowInsets.Type.systemBars());v.setPadding(i.left,i.top,i.right,i.bottom);}else v.setPadding(0,0,0,0);return insets;});
+        setContentView(root);root.requestApplyInsets();
+        LinearLayout header=row();header.setPadding(dp(18),dp(12),dp(18),dp(9));
+        ImageView logo=new ImageView(this);logo.setImageResource(R.drawable.ic_logo);logo.setElevation(dp(5));header.addView(logo,new LinearLayout.LayoutParams(dp(38),dp(38)));
+        TextView brand=text("PROMEIA",16,ink);brand.setTypeface(null,Typeface.BOLD);brand.setLetterSpacing(.14f);brand.setPadding(dp(11),0,0,0);header.addView(brand,new LinearLayout.LayoutParams(0,-2,1));
+        TextView info=text("PREMIUM AUDIO",10,muted);info.setLetterSpacing(.12f);header.addView(info);root.addView(header);
+        content=new FrameLayout(this);root.addView(content,new LinearLayout.LayoutParams(-1,0,1));
+        View glowA=new View(this);GradientDrawable glowBgA=new GradientDrawable();glowBgA.setShape(GradientDrawable.OVAL);glowBgA.setColor(Color.argb(32,Color.red(accent),Color.green(accent),Color.blue(accent)));glowA.setBackground(glowBgA);
+        if(Build.VERSION.SDK_INT>=31)glowA.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(34),dp(34),android.graphics.Shader.TileMode.CLAMP));
+        FrameLayout.LayoutParams glowLpA=new FrameLayout.LayoutParams(dp(230),dp(230),Gravity.TOP|Gravity.RIGHT);glowLpA.topMargin=dp(20);glowLpA.rightMargin=-dp(95);content.addView(glowA,glowLpA);
+        View glowB=new View(this);GradientDrawable glowBgB=new GradientDrawable();glowBgB.setShape(GradientDrawable.OVAL);glowBgB.setColor(Color.argb(23,90,130,255));glowB.setBackground(glowBgB);
+        if(Build.VERSION.SDK_INT>=31)glowB.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(38),dp(38),android.graphics.Shader.TileMode.CLAMP));
+        FrameLayout.LayoutParams glowLpB=new FrameLayout.LayoutParams(dp(210),dp(210),Gravity.BOTTOM|Gravity.LEFT);glowLpB.bottomMargin=dp(30);glowLpB.leftMargin=-dp(100);content.addView(glowB,glowLpB);
+        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(false);scroll.setClipToPadding(false);
+        body=col();body.setPadding(dp(18),dp(14),dp(18),dp(19));scroll.addView(body);
+        content.addView(scroll,new FrameLayout.LayoutParams(-1,-1));
         if("player".equals(page))drawPlayer();else if("eq".equals(page))drawEq();else if(selected!=null&&tab.equals("Playlists"))drawPlaylist();else switch(tab){case "Buscar":drawSearch();break;case "Playlists":drawLists();break;case "Ajustes":drawSettings();break;default:drawLibrary();}
-        mini=row();mini.setPadding(dp(12),dp(8),dp(8),dp(8));mini.setBackground(shape(panel,18));miniArt=new ImageView(this);miniArt.setScaleType(ImageView.ScaleType.CENTER_CROP);mini.addView(miniArt,new LinearLayout.LayoutParams(dp(46),dp(46)));miniTitle=text("Sin reproducción",14,ink);miniTitle.setPadding(dp(10),0,dp(4),0);miniTitle.setMaxLines(2);mini.addView(miniTitle,new LinearLayout.LayoutParams(0,-2,1));miniPlay=button("▶",()->toggle());mini.addView(miniPlay);mini.addView(button("⏭",()->{if(PlaybackService.active!=null)PlaybackService.active.next(true);}));mini.setOnClickListener(v->{page="player";draw();});miniTitle.setOnClickListener(v->{page="player";draw();});LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);mp.setMargins(dp(12),dp(4),dp(12),dp(5));root.addView(mini,mp);
-        LinearLayout nav=row();nav.setBackgroundColor(navColor);nav.setPadding(dp(7),dp(5),dp(7),dp(5));for(String t:new String[]{"Biblioteca","Buscar","Playlists","Ajustes"}){TextView n=button(t,()->{tab=t;page="";selected=null;draw();});n.setTextColor(t.equals(tab)&&page.isEmpty()?accent:muted);n.setTextSize(12);weight(nav,n);}root.addView(nav);updatePlayer();body.setAlpha(.85f);body.animate().alpha(1).setDuration(130).start();}
+        mini=row();mini.setPadding(dp(12),dp(9),dp(8),dp(9));mini.setBackground(shape(panel,20));mini.setElevation(dp(8));
+        miniArt=new ImageView(this);miniArt.setScaleType(ImageView.ScaleType.CENTER_CROP);miniArt.setBackground(shape(panel,13));mini.addView(miniArt,new LinearLayout.LayoutParams(dp(48),dp(48)));
+        miniTitle=text("Sin reproducción",14,ink);miniTitle.setTypeface(null,Typeface.BOLD);miniTitle.setPadding(dp(11),0,dp(4),0);miniTitle.setMaxLines(2);mini.addView(miniTitle,new LinearLayout.LayoutParams(0,-2,1));
+        miniPlay=button("▶",()->toggle());mini.addView(miniPlay);mini.addView(button("⏭",()->{if(PlaybackService.active!=null)PlaybackService.active.next(true);}));
+        mini.setOnClickListener(v->{animatePress(v);page="player";draw();});miniTitle.setOnClickListener(v->{page="player";draw();});
+        LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);mp.setMargins(dp(12),dp(5),dp(12),dp(7));root.addView(mini,mp);
+        LinearLayout nav=row();nav.setBackgroundColor(navColor);nav.setPadding(dp(7),dp(6),dp(7),dp(6));
+        for(String t:new String[]{"Biblioteca","Buscar","Playlists","Ajustes"}){
+            TextView n=button(t,()->{tab=t;page="";selected=null;draw();});
+            n.setTextColor(t.equals(tab)&&page.isEmpty()?accent:muted);n.setTextSize(12);weight(nav,n);
+        }
+        root.addView(nav);updatePlayer();
+        if(!introShown){introShown=true;showIntro(scroll);}
+    }
     void drawLibrary(){title("Tu música",store.songs.size()+" canciones · Solo archivos importados");LinearLayout a=row();weight(a,button("+ Importar audio",()->pickAudio()));weight(a,button("Favoritas",()->{group=group.equals("Favoritas")?"Canciones":"Favoritas";draw();}));add(body,a);if(store.actualRoot()==null)add(body,button("Elegir carpeta Promeia Music",()->chooseFolder(0)));EditText search=input("Buscar en tu biblioteca",filter);add(body,search);LinearLayout modes=row();for(String m:new String[]{"Canciones","Artistas","Álbumes"}){TextView v=button(m,()->{group=m;draw();});v.setTextColor(m.equals(group)?accent:muted);weight(modes,v);}add(body,modes);LinearLayout results=col();add(body,results);Runnable populate=()->{results.removeAllViews();ArrayList<Store.Song> songs=new ArrayList<>();for(Store.Song s:store.songs)if((!group.equals("Favoritas")||s.favorite)&&(s.title+" "+s.artist+" "+s.album).toLowerCase(Locale.ROOT).contains(filter.toLowerCase(Locale.ROOT)))songs.add(s);if(songs.isEmpty()){add(results,text("No hay canciones aquí. Importa tu música o cambia la búsqueda.",14,muted));return;}if(group.equals("Artistas")||group.equals("Álbumes")){TreeMap<String,ArrayList<Store.Song>> map=new TreeMap<>(String.CASE_INSENSITIVE_ORDER);for(Store.Song s:songs)map.computeIfAbsent(group.equals("Artistas")?s.artist:s.album,k->new ArrayList<>()).add(s);for(Map.Entry<String,ArrayList<Store.Song>> en:map.entrySet()){add(results,label(en.getKey()));for(Store.Song s:en.getValue())songRow(results,s,songs);}}else for(Store.Song s:songs)songRow(results,s,songs);};populate.run();search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int st,int c,int a){}public void onTextChanged(CharSequence s,int st,int before,int c){filter=s.toString();populate.run();}public void afterTextChanged(Editable e){}});}
     void art(ImageView v,String uri){v.setImageResource(R.drawable.ic_logo);v.setBackground(shape(panel,12));if(uri!=null&&!uri.isEmpty())try{v.setImageURI(Uri.parse(uri));if(v.getDrawable()==null)v.setImageResource(R.drawable.ic_logo);}catch(Exception ignored){}}
-    void songRow(LinearLayout target,Store.Song s,ArrayList<Store.Song> set){LinearLayout r=row();r.setPadding(dp(9),dp(8),dp(5),dp(8));r.setBackground(shape(panel,15));ImageView iv=new ImageView(this);iv.setScaleType(ImageView.ScaleType.CENTER_CROP);art(iv,s.cover);r.addView(iv,new LinearLayout.LayoutParams(dp(49),dp(49)));LinearLayout names=col();names.setPadding(dp(10),0,dp(4),0);TextView name=text(s.title,15,ink);name.setMaxLines(2);name.setTypeface(null,Typeface.BOLD);names.addView(name);TextView detail=text(s.artist+" · "+time(s.duration),12,muted);detail.setMaxLines(1);names.addView(detail);r.addView(names,new LinearLayout.LayoutParams(0,-2,1));TextView star=button(s.favorite?"♥":"♡",()->{s.favorite=!s.favorite;store.save();draw();});r.addView(star);r.addView(button("⋮",()->songMenu(s)));r.setOnClickListener(v->play(set,s));names.setOnClickListener(v->play(set,s));add(target,r);}
-    void play(ArrayList<Store.Song> set,Store.Song s){ArrayList<String> ids=new ArrayList<>();for(Store.Song x:set)ids.add(x.id);PlaybackService.play(this,ids,ids.indexOf(s.id));page="player";draw();}
-    void toggle(){PlaybackService p=PlaybackService.active;if(p==null){if(!store.songs.isEmpty())play(new ArrayList<>(store.songs),store.songs.get(0));return;}if(p.playing)p.pause();else p.resume();updatePlayer();}
+    void songRow(LinearLayout target,Store.Song s,ArrayList<Store.Song> set){LinearLayout r=row();r.setPadding(dp(9),dp(8),dp(5),dp(8));r.setBackground(shape(panel,15));ImageView iv=new ImageView(this);iv.setScaleType(ImageView.ScaleType.CENTER_CROP);art(iv,s.cover);r.addView(iv,new LinearLayout.LayoutParams(dp(49),dp(49)));LinearLayout names=col();names.setPadding(dp(10),0,dp(4),0);TextView name=text(s.title,15,ink);name.setMaxLines(2);name.setTypeface(null,Typeface.BOLD);names.addView(name);TextView detail=text(s.artist+" · "+time(s.duration),12,muted);detail.setMaxLines(1);names.addView(detail);r.addView(names,new LinearLayout.LayoutParams(0,-2,1));TextView star=button(s.favorite?"♥":"♡",()->{s.favorite=!s.favorite;store.save();draw();});r.addView(star);r.addView(button("⋮",()->songMenu(s)));r.setOnClickListener(v->{animatePress(r);play(set,s);});names.setOnClickListener(v->play(set,s));add(target,r);}
+    void play(ArrayList<Store.Song> set,Store.Song s){
+        ArrayList<String> ids=new ArrayList<>();for(Store.Song x:set)ids.add(x.id);
+        PlaybackService.play(this,ids,ids.indexOf(s.id));page="player";draw();feedback("Reproduciendo · "+s.title);
+    }
+    void toggle(){
+        PlaybackService p=PlaybackService.active;
+        if(p==null){if(!store.songs.isEmpty())play(new ArrayList<>(store.songs),store.songs.get(0));return;}
+        if(p.playing)p.pause();else p.resume();
+        updatePlayer();if(mini!=null)animatePress(mini);
+        feedback(p.playing?"Reproducción reanudada":"Reproducción pausada");
+    }
     void songMenu(Store.Song s){String[] opts={"Carátula · buscar o importar","Editar información","Agregar a playlist","Agregar a cola","Compartir archivo","Eliminar canción"};new AlertDialog.Builder(this).setTitle(s.title).setItems(opts,(d,i)->{switch(i){case 0:coverMenu(s.id,false,s.title+" "+s.artist+" album cover");break;case 1:edit(s);break;case 2:addToPlaylist(s);break;case 3:PlaybackService p=PlaybackService.active;if(p==null)play(new ArrayList<>(Collections.singletonList(s)),s);else{p.queue.add(s.id);toast("Añadida a la cola");}break;case 4:Intent share=new Intent(Intent.ACTION_SEND).setType("audio/*").putExtra(Intent.EXTRA_STREAM,Uri.parse(s.uri)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);startActivity(Intent.createChooser(share,"Compartir canción"));break;case 5:new AlertDialog.Builder(this).setTitle("Eliminar copia de Promeia").setMessage("El archivo original no se modifica. ¿Eliminar esta canción?").setNegativeButton("Cancelar",null).setPositiveButton("Eliminar",(a,b)->{try{PlaybackService pp=PlaybackService.active;if(pp!=null&&pp.song()==s)stopService(new Intent(this,PlaybackService.class));store.remove(s);draw();}catch(Exception e){error(e);}}).show();break;}}).show();}
     void edit(Store.Song s){LinearLayout l=col();l.setPadding(dp(18),dp(5),dp(18),dp(5));EditText t=input("Nombre",s.title),a=input("Artista",s.artist),b=input("Álbum",s.album);add(l,t);add(l,a);add(l,b);new AlertDialog.Builder(this).setTitle("Editar información").setView(l).setNegativeButton("Cancelar",null).setPositiveButton("Guardar",(d,i)->{if(!t.getText().toString().trim().isEmpty())s.title=t.getText().toString().trim();s.artist=a.getText().toString().trim();s.album=b.getText().toString().trim();store.save();draw();}).show();}
     String smartCoverQuery(String title,String artist){String t=title==null?"":title.trim(),a=artist==null?"":artist.trim();if(a.equalsIgnoreCase("Artista desconocido"))a="";return (t+" "+a+" carátula álbum").trim();}
@@ -75,7 +192,15 @@ public class MainActivity extends Activity {
     void ask(String title,String initial,Answer f){LinearLayout l=col();l.setPadding(dp(18),dp(6),dp(18),dp(6));EditText e=input(title,initial);add(l,e);new AlertDialog.Builder(this).setTitle(title).setView(l).setNegativeButton("Cancelar",null).setPositiveButton("Aceptar",(d,i)->{String x=e.getText().toString().trim();if(!x.isEmpty())f.value(x);}).show();}
     void chooseFolder(int action){afterFolder=action;Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);startActivityForResult(i,FOLDER);}
     void pickAudio(){if(store.actualRoot()==null){chooseFolder(AUDIO);return;}Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("audio/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(i,AUDIO);}
-    void importUris(ArrayList<Uri> uris){if(store.actualRoot()==null){toast("Selecciona una carpeta y vuelve a importar los archivos");chooseFolder(0);return;}toast("Importando archivos seleccionados…");worker.execute(()->{int n=0,dup=0,fail=0;String last="";for(Uri u:uris){try{if(store.importAudio(u)==null)dup++;else n++;}catch(Exception e){fail++;last=e.getMessage();}}String msg=n+" importadas · "+dup+" duplicadas · "+fail+" errores"+(fail>0?" · "+last:"");runOnUiThread(()->{tab="Biblioteca";page="";draw();toast(msg);});});}
+    void importUris(ArrayList<Uri> uris){
+        if(store.actualRoot()==null){toast("Selecciona una carpeta y vuelve a importar los archivos");chooseFolder(0);return;}
+        feedback("Importando música seleccionada…");
+        worker.execute(()->{int n=0,dup=0,fail=0;String last="";
+            for(Uri u:uris){try{if(store.importAudio(u)==null)dup++;else n++;}catch(Exception e){fail++;last=e.getMessage();}}
+            String msg=n+" importadas · "+dup+" duplicadas · "+fail+" errores"+(fail>0?" · "+last:"");
+            runOnUiThread(()->{tab="Biblioteca";page="";draw();feedback(msg);});
+        });
+    }
     @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null)return;Uri u=data.getData();try{if(request==FOLDER&&u!=null){getContentResolver().takePersistableUriPermission(u,data.getFlags()&(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION));store.setRoot(u);draw();if(afterFolder==AUDIO)pickAudio();afterFolder=0;}else if(request==AUDIO){ArrayList<Uri> a=new ArrayList<>();if(data.getClipData()!=null){for(int i=0;i<data.getClipData().getItemCount();i++)a.add(data.getClipData().getItemAt(i).getUri());}else if(u!=null)a.add(u);importUris(a);}else if(request==COVER&&u!=null){String id=coverId;boolean isList=coverPlaylist;worker.execute(()->{try(InputStream in=getContentResolver().openInputStream(u)){setCover(id,isList,Store.readAll(in,20*1024*1024));}catch(Exception e){runOnUiThread(()->error(e));}});}else if(request==EXPORT&&u!=null){try(OutputStream o=getContentResolver().openOutputStream(u,"wt")){o.write(store.snapshot().getBytes(java.nio.charset.StandardCharsets.UTF_8));}toast("Catálogo exportado");}else if(request==RESTORE&&u!=null){try(InputStream in=getContentResolver().openInputStream(u)){String j=new String(Store.readAll(in,20*1024*1024),java.nio.charset.StandardCharsets.UTF_8);new JSONObject(j);store.load(j);store.save();draw();toast("Catálogo restaurado; comprueba que los archivos siguen accesibles");}}}catch(Exception e){error(e);}}
     void handleShare(Intent i){if(!Intent.ACTION_SEND.equals(i.getAction()))return;Uri u=i.getParcelableExtra(Intent.EXTRA_STREAM);if(u==null)return;if(i.getType()!=null&&i.getType().startsWith("image/")){String id=store.p.getString("pendingCover","");boolean list=store.p.getBoolean("pendingPlaylist",false);if(id.isEmpty()){toast("Abre primero el apartado Carátula de una canción");return;}worker.execute(()->{try(InputStream in=getContentResolver().openInputStream(u)){setCover(id,list,Store.readAll(in,20*1024*1024));}catch(Exception e){runOnUiThread(()->error(e));}});}else importUris(new ArrayList<>(Collections.singletonList(u)));i.setAction(null);}
     void browser(String url){try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url)));}catch(Exception e){toast("No hay navegador disponible");}}
@@ -88,7 +213,7 @@ public class MainActivity extends Activity {
     void move(Store.Playlist p,Store.Song s,int dir){int i=p.ids.indexOf(s.id),j=i+dir;if(i>=0&&j>=0&&j<p.ids.size()){Collections.swap(p.ids,i,j);store.save();draw();}}
     String time(long m){long sec=Math.max(0,m/1000);return String.format(Locale.ROOT,"%d:%02d",sec/60,sec%60);}
     final Runnable tick=new Runnable(){public void run(){updatePlayer();handler.postDelayed(this,400);}};
-    void updatePlayer(){PlaybackService p=PlaybackService.active;Store.Song s=p==null?null:p.song();String id=s==null?"":s.id;boolean changed=!shownSong.equals(id);if(miniTitle!=null){miniTitle.setText(s==null?"Sin reproducción":s.title+"\n"+s.artist);miniPlay.setText(p!=null&&p.playing?"Ⅱ":"▶");if(changed||miniArt.getDrawable()==null)art(miniArt,s==null?"":s.cover);mini.setVisibility("player".equals(page)?View.GONE:View.VISIBLE);}if(progress!=null){int pos=p==null?0:p.position(),dur=p==null?0:p.duration();progress.setMax(Math.max(1,dur));if(!seeking)progress.setProgress(pos);clock.setText(time(pos)+"  /  "+time(dur));playButton.setText(p!=null&&p.playing?"Ⅱ":"▶");if(s!=null){currentTitle.setText(s.title);currentArtist.setText(s.artist);if(changed||playerArt.getDrawable()==null){art(playerArt,s.cover);applyArtworkColor(s);}}else{currentTitle.setText("Sin reproducción");currentArtist.setText("Elige una canción");}if(lyricsVisible&&s!=null&&!lyricSong.equals(id))loadLyrics(s);updateLyric(pos);}shownSong=id;}
+    void updatePlayer(){PlaybackService p=PlaybackService.active;Store.Song s=p==null?null:p.song();String id=s==null?"":s.id;boolean changed=!shownSong.equals(id);if(miniTitle!=null){miniTitle.setText(s==null?"Sin reproducción":s.title+"\n"+s.artist);miniPlay.setText(p!=null&&p.playing?"Ⅱ":"▶");boolean nowPlaying=p!=null&&p.playing;if(nowPlaying!=lastPlaying){animatePress(mini);lastPlaying=nowPlaying;}if(changed||miniArt.getDrawable()==null)art(miniArt,s==null?"":s.cover);mini.setVisibility("player".equals(page)?View.GONE:View.VISIBLE);}if(progress!=null){int pos=p==null?0:p.position(),dur=p==null?0:p.duration();progress.setMax(Math.max(1,dur));if(!seeking)progress.setProgress(pos);clock.setText(time(pos)+"  /  "+time(dur));playButton.setText(p!=null&&p.playing?"Ⅱ":"▶");if(s!=null){currentTitle.setText(s.title);currentArtist.setText(s.artist);if(changed||playerArt.getDrawable()==null){art(playerArt,s.cover);applyArtworkColor(s);}}else{currentTitle.setText("Sin reproducción");currentArtist.setText("Elige una canción");}if(lyricsVisible&&s!=null&&!lyricSong.equals(id))loadLyrics(s);updateLyric(pos);}shownSong=id;}
     boolean seeking=false;
     void drawPlayer(){title("Reproduciendo","Tu música, sin distracciones");PlaybackService p=PlaybackService.active;Store.Song s=p==null?null:p.song();playerArt=new ImageView(this);playerArt.setScaleType(ImageView.ScaleType.FIT_CENTER);art(playerArt,s==null?"":s.cover);int sz=Math.min(getResources().getDisplayMetrics().widthPixels-dp(44),dp(310));LinearLayout.LayoutParams ap=new LinearLayout.LayoutParams(sz,sz);ap.gravity=Gravity.CENTER_HORIZONTAL;ap.bottomMargin=dp(18);body.addView(playerArt,ap);currentTitle=text(s==null?"Sin reproducción":s.title,23,ink);currentTitle.setTypeface(null,Typeface.BOLD);add(body,currentTitle);currentArtist=text(s==null?"Elige una canción":s.artist,15,muted);add(body,currentArtist);progress=new SeekBar(this);progress.setProgressTintList(ColorStateList.valueOf(accent));progress.setThumbTintList(ColorStateList.valueOf(accent));progress.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar b,int n,boolean u){if(u&&clock!=null)clock.setText(time(n));}public void onStartTrackingTouch(SeekBar b){seeking=true;}public void onStopTrackingTouch(SeekBar b){seeking=false;if(PlaybackService.active!=null)PlaybackService.active.seek(b.getProgress());}});add(body,progress);clock=text("0:00 / 0:00",12,muted);clock.setGravity(Gravity.CENTER);add(body,clock);LinearLayout ctr=row();weight(ctr,button("⏮",()->{if(PlaybackService.active!=null)PlaybackService.active.previous();}));playButton=button("▶",()->toggle());playButton.setTextSize(28);weight(ctr,playButton);weight(ctr,button("⏭",()->{if(PlaybackService.active!=null)PlaybackService.active.next(true);}));add(body,ctr);LinearLayout modes=row();weight(modes,button(p!=null&&p.shuffle?"Aleatorio ✓":"Aleatorio",()->{if(PlaybackService.active!=null){PlaybackService.active.shuffle=!PlaybackService.active.shuffle;draw();}}));weight(modes,button(p==null||p.repeat==0?"Repetir: no":p.repeat==1?"Repetir: 1":"Repetir: todo",()->{if(PlaybackService.active!=null){PlaybackService.active.repeat=(PlaybackService.active.repeat+1)%3;draw();}}));weight(modes,button("Cola",()->queueDialog()));add(body,modes);LinearLayout tools=row();weight(tools,button("Ecualizador",()->{page="eq";draw();}));weight(tools,button("Letras",()->{lyricsVisible=!lyricsVisible;draw();}));weight(tools,button("⋮",()->{if(PlaybackService.active!=null&&PlaybackService.active.song()!=null)songMenu(PlaybackService.active.song());}));add(body,tools);if(lyricsVisible){add(body,label("Letras sincronizadas"));lyricLine=text("Buscando letra…",18,ink);add(body,lyricLine);add(body,button(showTranslation?"Ver letra original":"Traducir al español",()->{showTranslation=!showTranslation;if(showTranslation)translateLyrics();updateLyric(PlaybackService.active==null?0:PlaybackService.active.position());}));if(s!=null&&!lyricSong.equals(s.id))loadLyrics(s);else updateLyric(p==null?0:p.position());}if(s!=null)applyArtworkColor(s);}
     void applyArtworkColor(Store.Song s){if(s.cover.isEmpty())return;try(InputStream in=getContentResolver().openInputStream(Uri.parse(s.cover))){Bitmap bm=BitmapFactory.decodeStream(in);if(bm==null)return;Bitmap tiny=Bitmap.createScaledBitmap(bm,1,1,true);int color=tiny.getPixel(0,0);int mixed=Color.rgb((Color.red(color)+Color.red(accent)*2)/3,(Color.green(color)+Color.green(accent)*2)/3,(Color.blue(color)+Color.blue(accent)*2)/3);if(progress!=null){progress.setProgressTintList(ColorStateList.valueOf(mixed));progress.setThumbTintList(ColorStateList.valueOf(mixed));}if(playButton!=null)playButton.setBackground(shape(mixed,14));if(playButton!=null)playButton.setTextColor(Color.BLACK);if(tiny!=bm)tiny.recycle();bm.recycle();}catch(Exception ignored){}}
@@ -100,6 +225,42 @@ public class MainActivity extends Activity {
     void translateNext(Translator tr,ArrayList<Line> lines,int i,int request){if(request!=lyricRequest||i>=lines.size())return;Line x=lines.get(i);tr.translate(x.text).addOnSuccessListener(t->{if(request==lyricRequest){x.translated=t;translateNext(tr,lines,i+1,request);}}).addOnFailureListener(e->{if(request==lyricRequest)translateNext(tr,lines,i+1,request);});}
     void drawEq(){title("Ecualizador","Ajusta tu sonido · depende del dispositivo");add(body,button("‹ Reproductor",()->{page="player";draw();}));Switch sw=new Switch(this);sw.setText("Activar ecualizador");sw.setTextColor(ink);sw.setChecked(store.p.getBoolean("eqEnabled",false));sw.setOnCheckedChangeListener((b,on)->{store.p.edit().putBoolean("eqEnabled",on).apply();refreshEq();});add(body,sw);String[] names={"Normal","Rock","Pop","Jazz","Clásica","Electrónica","Hip-Hop","Personalizado"};int[][] values={{0,0,0,0,0},{5,3,-1,3,5},{-1,3,5,2,-1},{4,1,2,3,4},{5,2,0,2,5},{5,3,0,4,5},{6,3,0,1,3}};Spinner sp=new Spinner(this);sp.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names));sp.setSelection(store.p.getInt("preset",0));add(body,sp);final SeekBar[] sliders=new SeekBar[5];String[] hz={"60 Hz · Graves","230 Hz","910 Hz","3.6 kHz","14 kHz · Agudos"};for(int i=0;i<5;i++){final int b=i;TextView t=label(hz[i]+"   "+store.p.getInt("eq"+i,0)+" dB");add(body,t);SeekBar bar=new SeekBar(this);bar.setMax(24);bar.setProgress(store.p.getInt("eq"+i,0)+12);sliders[i]=bar;add(body,bar);bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar s,int n,boolean user){t.setText(hz[b]+"   "+(n-12)+" dB");if(user){store.p.edit().putInt("eq"+b,n-12).putInt("preset",7).apply();refreshEq();}}public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){}});}sp.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){boolean first=true;public void onItemSelected(AdapterView<?> p,View v,int i,long id){if(first){first=false;return;}store.p.edit().putInt("preset",i).apply();if(i<7){for(int k=0;k<5;k++){store.p.edit().putInt("eq"+k,values[i][k]).apply();sliders[k].setProgress(values[i][k]+12);}refreshEq();}}public void onNothingSelected(AdapterView<?> p){}});add(body,label("Refuerzo de graves"));SeekBar bass=new SeekBar(this);bass.setMax(100);bass.setProgress(store.p.getInt("bass",0));bass.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar b,int n,boolean u){if(u){store.p.edit().putInt("bass",n).apply();refreshEq();}}public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){}});add(body,bass);add(body,text("Los ajustes se guardan automáticamente. Las bandas se adaptan al ecualizador real del teléfono.",13,muted));}
     void refreshEq(){if(PlaybackService.active!=null)PlaybackService.active.applyEq();}
-    void drawSettings(){title("Configuración","Personaliza tu experiencia");add(body,label("Apariencia"));Switch sw=new Switch(this);sw.setText("Tema oscuro");sw.setTextColor(ink);sw.setChecked(dark);sw.setOnCheckedChangeListener((b,on)->{store.p.edit().putBoolean("dark",on).apply();draw();});add(body,sw);add(body,button("Ecualizador",()->{page="eq";draw();}));add(body,label("Almacenamiento"));add(body,text(store.actualRoot()==null?"Carpeta aún no seleccionada":"Promeia Music/Music · "+store.songs.size()+" archivos\nCarátulas: Promeia Music/Covers",14,muted));add(body,button("Seleccionar carpeta",()->chooseFolder(0)));add(body,button("Exportar catálogo JSON",()->{Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"promeia-biblioteca.json");startActivityForResult(i,EXPORT);}));add(body,button("Restaurar catálogo JSON",()->new AlertDialog.Builder(this).setTitle("Restaurar catálogo").setMessage("Reemplaza la lista actual, no copia audio. Debe conservarse acceso a la carpeta original.").setNegativeButton("Cancelar",null).setPositiveButton("Seleccionar",(d,i)->{Intent in=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(in,RESTORE);}).show()));add(body,label("Servicios"));add(body,button(store.p.getString("ytKey","").isEmpty()?"Configurar API de YouTube":"Cambiar clave de YouTube",()->ask("Clave de YouTube Data API v3","",key->{store.p.edit().putString("ytKey",key).apply();toast("Clave guardada en este dispositivo");draw();})));add(body,button("Eliminar clave",()->{store.p.edit().remove("ytKey").apply();draw();}));add(body,button("Google Cloud Console",()->browser("https://console.cloud.google.com/apis/library/youtube.googleapis.com")));add(body,label("Permisos"));add(body,text("No se analiza toda la memoria. Solo se accede a los archivos y carpeta que selecciones.",14,muted));add(body,button("Permisos del sistema",()->startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())))));add(body,text("Promeia Music · 1.0.0",12,muted));}
+    void paletteRow(String heading,String preference,int[] colors,String[] names){
+        add(body,label(heading));
+        LinearLayout chips=row();
+        for(int i=0;i<colors.length;i++){
+            final int color=colors[i];TextView chip=button(names[i],()->{store.p.edit().putInt(preference,color).apply();draw();});
+            chip.setBackground(shape(color,14));chip.setTextColor(Color.luminance(color)>.53f?Color.BLACK:Color.WHITE);chip.setTextSize(11);weight(chips,chip);
+        }
+        add(body,chips);
+        add(body,button("Automático",()->{store.p.edit().remove(preference).apply();draw();}));
+    }
+    void drawSettings(){
+        title("Configuración","Personaliza tu experiencia");
+        add(body,label("Apariencia"));
+        Switch sw=new Switch(this);sw.setText("Tema oscuro");sw.setTextColor(ink);sw.setChecked(dark);
+        sw.setOnCheckedChangeListener((b,on)->{store.p.edit().putBoolean("dark",on).apply();draw();});add(body,sw);
+        paletteRow("Color del fondo","bgColor",
+            new int[]{Color.parseColor("#090A0D"),Color.parseColor("#333740"),Color.parseColor("#747B85"),Color.parseColor("#F4F5F7")},
+            new String[]{"Negro","Carbón","Gris","Blanco"});
+        paletteRow("Color del texto","textColor",
+            new int[]{Color.parseColor("#FFFFFF"),Color.parseColor("#111318"),Color.parseColor("#A0A5AE"),Color.parseColor("#B7A4FF")},
+            new String[]{"Blanco","Negro","Gris","Lavanda"});
+        add(body,button("Ecualizador",()->{page="eq";draw();}));
+        add(body,label("Almacenamiento"));
+        add(body,text(store.actualRoot()==null?"Carpeta aún no seleccionada":"Promeia Music/Music · "+store.songs.size()+" archivos\nCarátulas: Promeia Music/Covers",14,muted));
+        add(body,button("Seleccionar carpeta",()->chooseFolder(0)));
+        add(body,button("Exportar catálogo JSON",()->{Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"promeia-biblioteca.json");startActivityForResult(i,EXPORT);}));
+        add(body,button("Restaurar catálogo JSON",()->new AlertDialog.Builder(this).setTitle("Restaurar catálogo").setMessage("Reemplaza la lista actual, no copia audio. Debe conservarse acceso a la carpeta original.").setNegativeButton("Cancelar",null).setPositiveButton("Seleccionar",(d,i)->{Intent in=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(in,RESTORE);}).show()));
+        add(body,label("Servicios"));
+        add(body,button(store.p.getString("ytKey","").isEmpty()?"Configurar API de YouTube":"Cambiar clave de YouTube",()->ask("Clave de YouTube Data API v3","",key->{store.p.edit().putString("ytKey",key).apply();feedback("Clave guardada en este dispositivo");draw();})));
+        add(body,button("Eliminar clave",()->{store.p.edit().remove("ytKey").apply();draw();}));
+        add(body,button("Google Cloud Console",()->browser("https://console.cloud.google.com/apis/library/youtube.googleapis.com")));
+        add(body,label("Permisos"));
+        add(body,text("No se analiza toda la memoria. Solo se accede a los archivos y carpeta que selecciones.",14,muted));
+        add(body,button("Permisos del sistema",()->startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())))));
+        add(body,text("Promeia · 1.1.0",12,muted));
+    }
+
     @Override public void onBackPressed(){if(!page.isEmpty()){page="";draw();}else if(selected!=null){selected=null;draw();}else if(!tab.equals("Biblioteca")){tab="Biblioteca";draw();}else super.onBackPressed();}
 }
